@@ -37,6 +37,16 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({
     [requiredGroup]
   );
 
+  const getAccessToken = useCallback(async (): Promise<string> => {
+    try {
+      const session = await fetchAuthSession();
+      return session.tokens?.accessToken?.toString() ?? "";
+    } catch (error) {
+      console.error("Error fetching access token:", error);
+      return "";
+    }
+  }, []);
+
   const checkUser = useCallback(
     async (shouldSetLoading = false) => {
       try {
@@ -130,6 +140,7 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({
         signIn: handleSignIn,
         signOut: handleSignOut,
         checkAccess,
+        getAccessToken,
       }}
     >
       {children}
