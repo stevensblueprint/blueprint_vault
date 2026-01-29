@@ -1,0 +1,59 @@
+name: Deploy Static Site
+
+on:
+    push:
+        branches: ["main"]
+
+permissions:
+    id-token: write
+    contents: read
+
+env:
+    AWS_ACCOUNT_ID: ${{ secrets.AWS_ACCOUNT_ID }}
+    AWS_REGION: ${{ secrets.AWS_REGION }}
+    BUILD_DIR: dist
+    S3_BUCKET: ${{ secrets.S3_BUCKET }}
+    CF_DISTRIBUTION_ID: ${{ secrets.DISTRIBUTION_ID }}
+
+jobs:
+    deploy:
+        runs-on: ubuntu-latest
+
+        steps:
+            - name: Checkout
+              uses: actions/checkout@v4
+            - name: Setup Node
+              uses: actions/setup-node@v4
+              with:
+                  node-version: "20"
+            - name: Install deps
+              run: |
+                  if [ -f package-lock.json ]; then npm ci; else npm i; fi
+            - name: Build site
+              env:
+                  VITE_AWS_REGION: ${{ secrets.VITE_AWS_REGION }}
+                  VITE_COGNITO_AUTH_DOMAIN: ${{ secrets.VITE_COGNITO_AUTH_DOMAIN }}
+                  VITE_COGNITO_REDIRECT_SIGN_IN: ${{ secrets.VITE_COGNITO_REDIRECT_SIGN_IN }}
+                  VITE_COGNITO_REDIRECT_SIGN_OUT: ${{ secrets.VITE_COGNITO_REDIRECT_SIGN_OUT }}
+                  VITE_COGNITO_USER_POOL_CLIENT_ID: ${{ secrets.VITE_COGNITO_USER_POOL_CLIENT_ID }}
+                  VITE_COGNITO_USER_POOL_ID: ${{ secrets.VITE_COGNITO_USER_POOL_ID }}
+                  VITE_PASSWORD_VAULT_API_URL: ${{ secrets.VITE_PASSWORD_VAULT_API_URL }}
+
+              run: |
+                  if [ -f package.json ]; then npm run build; else echo "No build step"; fi
+            - name: Configure AWS credentials (OIDC)
+              uses: aws-actions/configure-aws-credentials@v4
+              with:
+                  aws-region: ${{ env.AWS_REGION }}
+                  role-to-assume: arn:aws:iam::${{ env.AWS_ACCOUNT_ID }}:role/github-deployer-blueprint_vault
+                  role-session-name: gh-deploy-static
+
+            - name: Upload to S3
+              run: |
+                  aws s3 sync "$BUILD_DIR"/ "s3://$S3_BUCKET" --delete --only-show-errors
+
+            - name: Invalidate CloudFront
+              run: |
+                  aws cloudfront create-invalidation \
+                    --distribution-id "$CF_DISTRIBUTION_ID" \
+                    --paths "/*"
