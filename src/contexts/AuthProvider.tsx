@@ -17,25 +17,22 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({
 
   const requiredGroup = import.meta.env.VITE_REQUIRED_GROUP;
 
-  const checkAccess = useCallback(
-    async (): Promise<boolean> => {
-      try {
-        const session = await fetchAuthSession();
-        const idToken = session.tokens?.idToken?.toString();
+  const checkAccess = useCallback(async (): Promise<boolean> => {
+    try {
+      const session = await fetchAuthSession();
+      const idToken = session.tokens?.idToken?.toString();
 
-        if (!idToken) return false;
+      if (!idToken) return false;
 
-        const decoded = jwtDecode<CognitoUser>(idToken);
-        const userGroups = decoded["cognito:groups"] || [];
+      const decoded = jwtDecode<CognitoUser>(idToken);
+      const userGroups = decoded["cognito:groups"] || [];
 
-        return userGroups.includes(requiredGroup);
-      } catch (error) {
-        console.error("Error checking access:", error);
-        return false;
-      }
-    },
-    [requiredGroup]
-  );
+      return userGroups.includes(requiredGroup);
+    } catch (error) {
+      console.error("Error checking access:", error);
+      return false;
+    }
+  }, [requiredGroup]);
 
   const getAccessToken = useCallback(async (): Promise<string> => {
     try {
@@ -84,7 +81,7 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({
         });
       }
     },
-    [checkAccess]
+    [checkAccess],
   );
 
   useEffect(() => {
@@ -116,9 +113,9 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({
 
   const handleSignIn = () => {
     window.location.href = `https://${
-      import.meta.env.VITE_COGNITO_DOMAIN
+      import.meta.env.VITE_COGNITO_AUTH_DOMAIN
     }/oauth2/authorize?client_id=${
-      import.meta.env.VITE_USER_POOL_CLIENT_ID
+      import.meta.env.VITE_COGNITO_USER_POOL_CLIENT_ID
     }&response_type=code&scope=email+openid+profile&redirect_uri=${
       import.meta.env.VITE_APP_URL
     }/callback`;
