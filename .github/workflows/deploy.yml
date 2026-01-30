@@ -38,6 +38,7 @@ jobs:
                   VITE_COGNITO_USER_POOL_CLIENT_ID: ${{ secrets.VITE_COGNITO_USER_POOL_CLIENT_ID }}
                   VITE_COGNITO_USER_POOL_ID: ${{ secrets.VITE_COGNITO_USER_POOL_ID }}
                   VITE_PASSWORD_VAULT_API_URL: ${{ secrets.VITE_PASSWORD_VAULT_API_URL }}
+                  VITE_APP_URL: ${{ secrets.VITE_APP_URL }}
 
               run: |
                   if [ -f package.json ]; then npm run build; else echo "No build step"; fi
