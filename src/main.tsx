@@ -7,17 +7,17 @@ Amplify.configure({
   Auth: {
     Cognito: {
       userPoolClientId: import.meta.env
-        .VITE_COGNITO_USER_POOL_CLIENT_ID! as string,
-      userPoolId: import.meta.env.VITE_COGNITO_USER_POOL_ID! as string,
+        .VITE_COGNITO_USER_POOL_CLIENT_ID as string,
+      userPoolId: import.meta.env.VITE_COGNITO_USER_POOL_ID as string,
       loginWith: {
         oauth: {
-          domain: import.meta.env.VITE_COGNITO_AUTH_DOMAIN! as string,
+          domain: import.meta.env.VITE_COGNITO_AUTH_DOMAIN as string,
           scopes: ["email", "openid", "profile"],
           redirectSignIn: [
-            import.meta.env.VITE_COGNITO_REDIRECT_SIGN_IN! as string,
+            import.meta.env.VITE_COGNITO_REDIRECT_SIGN_IN as string,
           ],
           redirectSignOut: [
-            import.meta.env.VITE_COGNITO_REDIRECT_SIGN_OUT! as string,
+            import.meta.env.VITE_COGNITO_REDIRECT_SIGN_OUT as string,
           ],
           responseType: "code",
         },
