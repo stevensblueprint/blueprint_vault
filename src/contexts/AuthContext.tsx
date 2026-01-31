@@ -117,7 +117,7 @@ export const AuthProvider: React.FC<AuthProviderProps> = ({ children }) => {
       setUser({
         id: currentUser.userId,
         email: currentUser.signInDetails?.loginId,
-        firstName: currentUser.username,
+        firstName: currentUser.signInDetails?.loginId,
       });
     } catch (error) {
       console.error("Auth session check failed:", error);
