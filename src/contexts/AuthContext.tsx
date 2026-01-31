@@ -112,12 +112,18 @@ export const AuthProvider: React.FC<AuthProviderProps> = ({ children }) => {
       }
 
       setHasValidTokens(true);
+      const idToken = session.tokens?.idToken;
+      const claims = idToken?.payload as Record<string, unknown> | undefined;
+      const emailFromToken =
+        (claims?.email as string | undefined) ??
+        (claims?.["cognito:username"] as string | undefined);
+      const givenNameFromToken = claims?.given_name as string | undefined;
       const currentUser = await getCurrentUser();
 
       setUser({
         id: currentUser.userId,
-        email: currentUser.signInDetails?.loginId,
-        firstName: currentUser.signInDetails?.loginId,
+        email: emailFromToken || currentUser.signInDetails?.loginId,
+        firstName: givenNameFromToken || emailFromToken?.split("@")[0],
       });
     } catch (error) {
       console.error("Auth session check failed:", error);
