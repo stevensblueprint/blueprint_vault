@@ -14,9 +14,11 @@ Amplify.configure({
           domain: import.meta.env.VITE_COGNITO_AUTH_DOMAIN as string,
           scopes: ["email", "openid", "profile"],
           redirectSignIn: [
+            "http://localhost:5173/callback",
             import.meta.env.VITE_COGNITO_REDIRECT_SIGN_IN as string,
           ],
           redirectSignOut: [
+            "http://localhost:5173/",
             import.meta.env.VITE_COGNITO_REDIRECT_SIGN_OUT as string,
           ],
           responseType: "code",

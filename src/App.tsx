@@ -1,19 +1,30 @@
-import { BrowserRouter, Routes, Route, Navigate } from "react-router-dom";
-import { AuthProvider } from "./contexts/AuthProvider";
+import { useEffect } from "react";
+import { BrowserRouter, Routes, Route, useNavigate } from "react-router-dom";
+import { AuthProvider, useAuth } from "./contexts/AuthContext";
 import { ProtectedRoute } from "./components/ProtectedRoute";
-import { Callback } from "./pages/Callback";
-import { AccessDenied } from "./pages/AccessDenied";
 import { Home } from "./pages/Home";
 import { NotFound } from "./pages/NotFound";
+
+export const OAuthCallback = () => {
+  const { isAuthenticated, loading } = useAuth();
+  const navigate = useNavigate();
+
+  useEffect(() => {
+    if (!loading && isAuthenticated) {
+      const redirect = sessionStorage.getItem("oauth_redirect") || "/dashboard";
+      sessionStorage.removeItem("oauth_redirect");
+      navigate(redirect);
+    }
+  }, [loading, isAuthenticated, navigate]);
+
+  return <div>Completing sign in...</div>;
+};
 
 function App() {
   return (
     <BrowserRouter>
       <AuthProvider>
         <Routes>
-          <Route path="/callback" element={<Callback />} />
-          <Route path="/logout" element={<Navigate to="/" replace />} />
-          <Route path="/access-denied" element={<AccessDenied />} />
           <Route
             path="/"
             element={
@@ -22,6 +33,7 @@ function App() {
               </ProtectedRoute>
             }
           />
+          <Route path="/callback" element={<OAuthCallback />} />
           <Route path="*" element={<NotFound />} />
         </Routes>
       </AuthProvider>
