@@ -206,7 +206,7 @@ export const AuthProvider: React.FC<AuthProviderProps> = ({ children }) => {
       const domain = import.meta.env.VITE_COGNITO_DOMAIN;
       const clientId = import.meta.env.VITE_COGNITO_USER_POOL_CLIENT_ID;
       const logoutUri = encodeURIComponent(
-        import.meta.env.VITE_OAUTH_REDIRECT_SIGNOUT,
+        import.meta.env.VITE_COGNITO_REDIRECT_SIGN_OUT,
       );
       window.location.href = `https://${domain}/logout?client_id=${clientId}&logout_uri=${logoutUri}`;
     }
