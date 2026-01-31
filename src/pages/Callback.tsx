@@ -6,33 +6,33 @@ import { useAuth } from "../hooks/useAuth";
 
 export const Callback: React.FC = () => {
   const navigate = useNavigate();
-  const { isAuthenticated, signIn } = useAuth();
+  const { isAuthenticated, isLoading } = useAuth();
   const processing = React.useRef(false);
 
   useEffect(() => {
-    if (isAuthenticated) {
-      navigate("/", { replace: true });
-      return;
-    }
-
-    if (processing.current) {
-      return;
-    }
-    processing.current = true;
-
     const handleCallback = async () => {
+      if (processing.current) {
+        return;
+      }
+      processing.current = true;
+
       try {
         await fetchAuthSession();
         Hub.dispatch("auth", { event: "signedIn", data: null });
       } catch (error) {
         console.error("Error handling callback:", error);
-        processing.current = false; // Allow retry on error
-        signIn();
+        processing.current = false;
       }
     };
 
     handleCallback();
-  }, [navigate, isAuthenticated, signIn]);
+  }, []);
+
+  useEffect(() => {
+    if (!isLoading && isAuthenticated) {
+      navigate("/", { replace: true });
+    }
+  }, [isAuthenticated, isLoading, navigate]);
 
   return (
     <div className="flex items-center justify-center min-h-screen">
