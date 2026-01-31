@@ -11,7 +11,7 @@ class ApiClient {
 
   constructor(baseURL?: string) {
     this.axiosInstance = axios.create({
-      baseURL: baseURL || import.meta.env.VITE_API_BASE_URL,
+      baseURL: baseURL || import.meta.env.VITE_PASSWORD_VAULT_API_URL,
       headers: {
         "Content-Type": "application/json",
       },
