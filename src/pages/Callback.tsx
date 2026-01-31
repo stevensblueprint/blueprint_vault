@@ -1,23 +1,38 @@
 import React, { useEffect } from "react";
 import { useNavigate } from "react-router-dom";
 import { fetchAuthSession } from "aws-amplify/auth";
+import { Hub } from "aws-amplify/utils";
+import { useAuth } from "../hooks/useAuth";
 
 export const Callback: React.FC = () => {
   const navigate = useNavigate();
+  const { isAuthenticated, signIn } = useAuth();
+  const processing = React.useRef(false);
 
   useEffect(() => {
+    if (isAuthenticated) {
+      navigate("/", { replace: true });
+      return;
+    }
+
+    if (processing.current) {
+      return;
+    }
+    processing.current = true;
+
     const handleCallback = async () => {
       try {
-        await fetchAuthSession({ forceRefresh: true });
-        navigate("/", { replace: true });
+        await fetchAuthSession();
+        Hub.dispatch("auth", { event: "signedIn", data: null });
       } catch (error) {
         console.error("Error handling callback:", error);
-        navigate("/login", { replace: true });
+        processing.current = false; // Allow retry on error
+        signIn();
       }
     };
 
     handleCallback();
-  }, [navigate]);
+  }, [navigate, isAuthenticated, signIn]);
 
   return (
     <div className="flex items-center justify-center min-h-screen">
