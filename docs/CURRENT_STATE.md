@@ -11,6 +11,7 @@ This document records the current state of the `blueprint_vault` repository, bas
 7. Pending technical decisions
 8. Reuse recommendation
 9. What can be reused from `blueprint_deploy`
+10. Audit logging and secret-handling requirements (task S1-10)
 
 **Last verified:** 2026-11-01, against commit `6973bcb` on `main`.
 
@@ -473,6 +474,7 @@ These need to be discussed in the next sprint planning:
 10. **Security headers:** Set a Content Security Policy and other security headers through a CloudFront response headers policy.
 11. **Testing:** Choose a test stack (for example Vitest and React Testing Library). Encryption and auth flows should have tests before release.
 12. **Scanning:** Turn on Dependabot (`.github/dependabot.yml`), CodeQL code scanning and secret scanning.
+13. **Audit logging and secret handling:** Approve or change the 12 retention, tamper-resistance and privacy questions in §10.8, and the fail-closed rule in §10.7.
 
 ## 8) Reuse Recommendation
 
@@ -516,3 +518,276 @@ The repo is an early skeleton (about 720 lines). Its value is in the auth layer,
 - Node 20 in the deploy workflow, while development uses Node 22
 - A deploy workflow that runs independently of the lint and build checks
 - No tests, no Dependabot and no CodeQL
+
+## 10) Audit Logging and Secret-Handling Requirements (S1-10)
+
+> **Status: Proposed – not approved.** This section proposes requirements; it does not describe anything that exists today. Items marked **Owner decision** need approval from the Project Owner before they are final. Everything else is a recommendation the team can change through review.
+
+### 10.1 What this section covers
+
+This section defines:
+
+- **What must be recorded** whenever someone uses the vault, both when an action is allowed and when it is denied
+- **What must never be recorded**, so that logs cannot leak passwords, tokens or other secrets
+- **How secret values must be protected** in transit, at rest, in the browser and in configuration
+- **Who is responsible for which logs**: AWS services, or our own application code
+- **What happens if audit logging fails**
+- **The questions about retention and tamper-resistance** that the Project Owner needs to answer
+
+It is written for `blueprint_vault`, because a password vault has the strictest needs. The same rules should apply to `blueprint_deploy` (see §10.11).
+
+**Terms used in this section:**
+
+| Term                        | Meaning                                                                                                                                                                        |
+| --------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| **Audit event**             | A permanent record that a specific person tried to do a specific thing, and whether it was allowed. It answers "who did what, to what, when, and was it allowed?"              |
+| **Application log**         | A debugging message written by the code, such as an error or a stack trace. It is **not** an audit event, it can be deleted, and it must follow the same secret rules (§10.5). |
+| **Secret**                  | Any value that would let someone read a password or act as a user: plaintext passwords, encryption keys, login tokens, cookies, credentials                                    |
+| **Actor**                   | The person (or system) performing the action, identified by their Cognito user ID                                                                                              |
+| **Target**                  | The thing being acted on, such as a password entry, identified by its ID only                                                                                                  |
+| **Allowed / denied**        | Whether the action was permitted. A denied attempt is just as important to record as an allowed one.                                                                           |
+| **AWS CloudTrail**          | The AWS service that records calls made to AWS itself, such as "this role asked KMS to decrypt something"                                                                      |
+| **AWS KMS**                 | Key Management Service. It holds the encryption keys that protect stored passwords (_Assumed_ from the data model, §2).                                                        |
+| **Fail closed / fail open** | If audit logging breaks: _fail closed_ means block the action, and _fail open_ means allow it anyway and raise an alert                                                        |
+
+### 10.2 Where things stand today (verified in the code)
+
+- **There is no audit logging anywhere in this repository.** The frontend only writes debugging messages to the browser console (11 `console.*` calls).
+- **One of those messages leaks a token.** `Home.tsx` logs the whole Axios error object when loading entries fails. That object includes the request headers, so the user's `Authorization: Bearer <token>` header is printed to the browser console. The same pattern elsewhere would leak tokens to any log collector added later. **This breaks rule §10.5 and should be fixed.**
+- **Login tokens are stored in browser `localStorage`.** This is Amplify's default, and no other storage is configured. Any script running on the page could read them, which is why a Content Security Policy matters (§6).
+- **What the backend logs is _Unknown_.** The backend is not in this repo (§1).
+- **Whether CloudTrail is enabled, and how long it keeps records, is _Unknown_** (§3).
+
+### 10.3 Who is responsible for which logs
+
+Audit events must be written by the **backend**, never by the browser. Anyone can change or switch off code running in their own browser, so the frontend cannot be trusted to report what happened.
+
+| Layer                                   | What it records                                                                                                                                                                 | Who owns it               | Status                                |
+| --------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------- | ------------------------------------- |
+| **AWS level: CloudTrail**               | Every call to AWS services: KMS encrypt and decrypt, IAM changes, S3 and CloudFront configuration changes, Cognito administration, and the GitHub deploy role signing in        | AWS account administrator | _Unknown_ whether enabled             |
+| **AWS level: CloudTrail data events**   | Reads and writes to individual database records (DynamoDB) or S3 objects. These are **off by default** and must be turned on separately.                                        | AWS account administrator | _Unknown_                             |
+| **AWS level: Cognito sign-in activity** | Sign-ins, failed sign-ins and password resets. Cognito can export these on its advanced security (threat protection) tier.                                                      | AWS account administrator | _Unknown_ whether that tier is in use |
+| **AWS level: API Gateway access logs**  | Every request to the API: time, route, status code and request ID                                                                                                               | Backend team              | _Unknown_                             |
+| **Application level: vault API**        | **What only our code knows:** which user did what to which entry, whether it was allowed, and why it was denied. This is the main audit trail, and it uses the schema in §10.4. | Backend team              | **Not built**                         |
+| **Frontend (this repo)**                | **No audit events.** It may show users their own history later, but only by reading it from the backend.                                                                        | Frontend team             | Correct by design                     |
+| **GitHub**                              | Code changes, who merged what, deployments, and settings changes (the organization audit log)                                                                                   | GitHub org owners         | Exists, not reviewed                  |
+
+**How the layers connect:** when the vault API decrypts a password, two records should exist. The application audit event says "user X revealed entry Y". The CloudTrail KMS record says "the API role decrypted data for entry Y". To link them, the KMS **encryption context** should contain the `entryId` and `ownerId`. CloudTrail records the encryption context **in plaintext**, so it must **never** contain secrets or entry content.
+
+### 10.4 Proposed audit-event schema
+
+Every audit event is one JSON object in the format below, written by the vault API.
+
+**Events to record.** Every event records its outcome (allowed, denied or error):
+
+| Event type                      | When it is recorded                                                                                 | Sensitivity  |
+| ------------------------------- | --------------------------------------------------------------------------------------------------- | ------------ |
+| `auth.token_rejected`           | The API receives a missing, expired, malformed or wrong-type token                                  | High         |
+| `authz.denied`                  | A signed-in user tries something they are not permitted to do, such as opening someone else's entry | High         |
+| `entry.list`                    | A user lists their entries                                                                          | Low          |
+| `entry.read`                    | A user opens one entry's details (without the password)                                             | Medium       |
+| `entry.reveal`                  | A user retrieves a password to view or copy it. **This is the most sensitive event.**               | **Critical** |
+| `entry.create`                  | A user creates an entry                                                                             | High         |
+| `entry.update`                  | A user changes an entry. The event records **which fields changed**, never their values.            | High         |
+| `entry.delete`                  | A user deletes an entry                                                                             | High         |
+| `entry.share` / `entry.unshare` | A user shares or stops sharing an entry. This only applies if sharing is approved (§7, decision 3). | Critical     |
+| `admin.*`                       | An administrator changes roles, disables a user or rotates a key                                    | Critical     |
+| `audit.write_failed`            | An audit event could not be stored (§10.7). This goes to the alerting system, not the audit store.  | Critical     |
+
+Sign-in and sign-out happen in Cognito, not in our API, so they are recorded at the AWS level (§10.3), not here.
+
+**Fields:**
+
+| Field                 | Type          | Required               | What it contains                                                                          | Example                          |
+| --------------------- | ------------- | ---------------------- | ----------------------------------------------------------------------------------------- | -------------------------------- |
+| `schemaVersion`       | string        | Yes                    | The version of this format                                                                | `"1.0"`                          |
+| `eventId`             | string (UUID) | Yes                    | A unique ID for this event                                                                | `"7f3c…"`                        |
+| `timestamp`           | string        | Yes                    | When the event happened, in UTC from the **server** clock (ISO 8601)                      | `"2026-11-11T15:04:05.123Z"`     |
+| `eventType`           | string        | Yes                    | One of the event types above                                                              | `"entry.reveal"`                 |
+| `outcome`             | string        | Yes                    | `"allowed"`, `"denied"` or `"error"`                                                      | `"denied"`                       |
+| `reason`              | string        | When denied or error   | A fixed code from an agreed list, never free text or user input                           | `"NOT_OWNER"`, `"TOKEN_EXPIRED"` |
+| `actor.userId`        | string        | Yes, if known          | The Cognito user ID (`sub`). For a rejected token it is `"unknown"`.                      | `"a1b2c3d4-…"`                   |
+| `actor.tokenUse`      | string        | Yes, if known          | Which token type was presented: `"id"` or `"access"` (§7, decision 4)                     | `"id"`                           |
+| `actor.sourceIp`      | string        | **Owner decision**     | The caller's IP address. This is personal data (§10.8).                                   | `"203.0.113.7"`                  |
+| `actor.userAgent`     | string        | **Owner decision**     | The browser name, cut to 200 characters                                                   | `"Mozilla/5.0 …"`                |
+| `target.type`         | string        | When there is a target | What kind of thing was acted on                                                           | `"passwordEntry"`                |
+| `target.id`           | string        | When there is a target | The entry's **ID only**                                                                   | `"entry_8d2f"`                   |
+| `target.ownerId`      | string        | When there is a target | The user ID of the entry's owner. This shows when someone acts on another person's entry. | `"a1b2c3d4-…"`                   |
+| `authz.decision`      | string        | Yes                    | `"allow"` or `"deny"`                                                                     | `"deny"`                         |
+| `authz.rule`          | string        | Yes                    | The name of the rule that decided                                                         | `"owner-only"`                   |
+| `changedFields`       | string[]      | `entry.update` only    | The **names** of the fields that changed, never their values                              | `["username","password"]`        |
+| `request.id`          | string        | Yes                    | The API Gateway request ID, used to find the matching access log                          | `"c6af9ac6-…"`                   |
+| `request.method`      | string        | Yes                    | The HTTP method                                                                           | `"GET"`                          |
+| `request.route`       | string        | Yes                    | The route **pattern**, never the real URL with its values or query string                 | `"/passwords/{entryId}/reveal"`  |
+| `service.name`        | string        | Yes                    | The service that wrote the event                                                          | `"blueprint-vault-api"`          |
+| `service.environment` | string        | Yes                    | The environment                                                                           | `"prod"`                         |
+| `service.version`     | string        | Yes                    | The deployed version or commit                                                            | `"db4270d"`                      |
+
+**Example: an allowed password reveal**
+
+```json
+{
+  "schemaVersion": "1.0",
+  "eventId": "7f3c2a9e-4b1d-4c8e-9f0a-2d6b1e5c3a71",
+  "timestamp": "2026-11-11T15:04:05.123Z",
+  "eventType": "entry.reveal",
+  "outcome": "allowed",
+  "actor": {
+    "userId": "a1b2c3d4-0000-0000-0000-000000000001",
+    "tokenUse": "access"
+  },
+  "target": {
+    "type": "passwordEntry",
+    "id": "entry_8d2f",
+    "ownerId": "a1b2c3d4-0000-0000-0000-000000000001"
+  },
+  "authz": { "decision": "allow", "rule": "owner-only" },
+  "request": {
+    "id": "c6af9ac6-7b61-11e6-9a41-93e8deadbeef",
+    "method": "GET",
+    "route": "/passwords/{entryId}/reveal"
+  },
+  "service": {
+    "name": "blueprint-vault-api",
+    "environment": "prod",
+    "version": "db4270d"
+  }
+}
+```
+
+**Example: a denied attempt to open someone else's entry**
+
+```json
+{
+  "schemaVersion": "1.0",
+  "eventId": "0b9e6d2c-8a4f-4e3b-a7c1-5f2e9d8b4a60",
+  "timestamp": "2026-11-11T15:06:41.900Z",
+  "eventType": "authz.denied",
+  "outcome": "denied",
+  "reason": "NOT_OWNER",
+  "actor": {
+    "userId": "f9e8d7c6-0000-0000-0000-000000000002",
+    "tokenUse": "access"
+  },
+  "target": {
+    "type": "passwordEntry",
+    "id": "entry_8d2f",
+    "ownerId": "a1b2c3d4-0000-0000-0000-000000000001"
+  },
+  "authz": { "decision": "deny", "rule": "owner-only" },
+  "request": {
+    "id": "d71bb2f0-7b61-11e6-9a41-93e8deadbeef",
+    "method": "GET",
+    "route": "/passwords/{entryId}/reveal"
+  },
+  "service": {
+    "name": "blueprint-vault-api",
+    "environment": "prod",
+    "version": "db4270d"
+  }
+}
+```
+
+All IDs above are made up.
+
+### 10.5 What must never appear in audit events or logs
+
+This rule applies to **audit events, application logs, error messages, analytics, monitoring tools and the browser console alike**.
+
+| Never record                  | Examples                                                                                                                                               |
+| ----------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| Passwords in any form         | The plaintext password, the decrypted value, the `ciphertext` and the password length                                                                  |
+| Encryption keys               | KMS data keys, whether plaintext or encrypted                                                                                                          |
+| Login tokens and codes        | ID tokens, access tokens, refresh tokens, the OAuth `code` from the `/callback` URL, and PKCE values                                                   |
+| Sensitive headers             | `Authorization`, `Cookie`, `Set-Cookie`, `X-Amz-Security-Token`, `X-Api-Key`. **Log no headers at all**, except `User-Agent` if the Owner approves it. |
+| Request and response bodies   | Never log a whole body. Copy only the specific fields the schema allows.                                                                               |
+| Full URLs and query strings   | Log the route pattern (`/passwords/{entryId}`) instead                                                                                                 |
+| Entry content                 | `label`, `username`, `url` and `notes`. A label such as "Chase checking" already reveals something.                                                    |
+| Credentials and configuration | AWS keys, GitHub secrets, `.env` values                                                                                                                |
+| Whole error objects           | Log only `error.message` and a status code. Axios error objects include the request headers and therefore the token (§10.2).                           |
+
+**How this is enforced:**
+
+1. **Build events from an allowlist.** Code builds each event field by field from the schema in §10.4, and never copies or spreads a request, header or error object into a log.
+2. **Redact in one place.** One logging helper in the backend (and one in the frontend for console output) removes forbidden keys before anything is written.
+3. **Test it.** An automated test sends requests that include a real-looking token and password, then fails if either one appears in any log output. It searches for patterns such as `Bearer `, JWT text starting with `eyJ`, and the test password.
+4. **Keep the KMS encryption context clean.** It may only contain IDs (`entryId`, `ownerId`), because CloudTrail stores it in plaintext.
+
+### 10.6 Secret-handling requirements
+
+| Where                             | Requirement                                                                                                                                                                                                                     |
+| --------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **In transit**                    | HTTPS only, everywhere. CloudFront redirects HTTP to HTTPS, with HSTS turned on.                                                                                                                                                |
+| **At rest**                       | Passwords are stored only in encrypted form, protected by KMS keys. Plaintext passwords are never stored. **Owner decision:** whether `notes` and `url` are encrypted too (§6).                                                 |
+| **Key access**                    | Only the vault API's role is allowed to decrypt. People, the deploy role and other services are not.                                                                                                                            |
+| **In the browser**                | A revealed password is kept **only in memory**: never in `localStorage`, `sessionStorage`, IndexedDB, cookies or the URL. It is cleared when hidden, when the user leaves the page and on logout.                               |
+| **Clipboard**                     | **Owner decision:** how quickly a copied password is cleared from the clipboard. Proposed: 30 seconds.                                                                                                                          |
+| **Login tokens**                  | Tokens currently sit in `localStorage` (§10.2). **Decision needed:** keep them there with a strict CSP, or move them to cookies. Either way, tokens are never logged, never put in URLs and never sent anywhere except our API. |
+| **Re-authentication**             | **Owner decision:** whether revealing a password requires a recent sign-in, and how recent. Proposed: within the last 15 minutes.                                                                                               |
+| **Idle timeout**                  | **Owner decision:** sign users out after a period of inactivity. Proposed: 15 minutes.                                                                                                                                          |
+| **Frontend configuration**        | **Every `VITE_` variable is public.** Vite copies them into the JavaScript that every visitor downloads. Only non-secret values such as URLs and public IDs may go in them, never keys, passwords or tokens.                    |
+| **CI/CD**                         | Secrets live only in GitHub Actions secrets. AWS access uses OIDC, so there are no stored AWS keys. Workflows must never print secrets.                                                                                         |
+| **Local development**             | Real values go in `.env.local`, which `.gitignore` excludes (verified). Never commit, screenshot or paste real secrets into tickets, PRs or chat.                                                                               |
+| **Error messages shown to users** | Short and generic, such as "Could not load your entries." Never include internal details, tokens or stack traces.                                                                                                               |
+
+### 10.7 What happens if audit logging fails
+
+**Proposed rule: for sensitive actions, if the audit event cannot be stored, the action does not happen.**
+
+| Action                                                                                   | If the audit event cannot be stored                                                               | Why                                                                                                           |
+| ---------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------- |
+| `entry.reveal`, `entry.create`, `entry.update`, `entry.delete`, `entry.share`, `admin.*` | **Fail closed.** The action is refused, and the user sees "Please try again shortly."             | A password must never be revealed or changed without a record. A missing record is worse than a short outage. |
+| `entry.list`, `entry.read`                                                               | **Fail open, with an alert.** The action goes ahead, and an `audit.write_failed` alert is raised. | Low risk, and keeping the vault usable matters more                                                           |
+| `auth.token_rejected`, `authz.denied`                                                    | Record it if possible, and raise an alert if not. The request is refused either way.              | The request is already blocked                                                                                |
+
+Further requirements:
+
+- **Write before returning.** For a reveal, the API stores the audit event **first** and only then sends the password back.
+- **Alerting.** Every failed audit write sends an alert to a named person or channel (**Owner decision**, §10.8). Monitoring should also alert on sudden spikes in denied events, such as one user being denied many times.
+- **No silent loss.** If events are sent through a queue, the queue must be durable, and failed deliveries must be kept and retried, not dropped.
+- **Owner decision:** whether the Owner accepts that sensitive actions are blocked during an audit outage. The alternative, fail open, means some password reveals could go unrecorded.
+
+### 10.8 Retention and tamper-resistance: questions for Owner approval
+
+Each question has a proposed answer so the meeting can approve or change it quickly.
+
+| #   | Question                                                                           | Why it matters                                                             | Proposed answer                                                                                           | Owner decision |
+| --- | ---------------------------------------------------------------------------------- | -------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------- | -------------- |
+| 1   | How long are application audit events kept?                                        | Long enough to investigate incidents, but not forever                      | 1 year: 90 days searchable, then archived                                                                 | ☐              |
+| 2   | How long are AWS CloudTrail records kept?                                          | Without a configured "trail", CloudTrail keeps only **90 days** of history | Create a trail that writes to S3 and keep it for 1 year                                                   | ☐              |
+| 3   | Must audit logs be impossible to change or delete before they expire?              | Stops anyone, including admins, from erasing evidence                      | Yes. Use S3 Object Lock in a separate audit bucket, and turn on CloudTrail log file integrity validation. | ☐              |
+| 4   | Where are audit logs stored?                                                       | Logs kept beside the app can be deleted by someone who compromises the app | A separate bucket that the API can **write to but not read or delete**                                    | ☐              |
+| 5   | Who can read audit logs?                                                           | Audit logs reveal who uses which accounts                                  | The Project Owner and one named administrator. Their access to the logs is itself recorded.               | ☐              |
+| 6   | Can users see their own activity history?                                          | It helps users spot misuse of their own account                            | Yes, later. Users see only their own events.                                                              | ☐              |
+| 7   | May we record IP addresses and browser user agents?                                | These are personal data, and university policy may apply                   | Yes, for security purposes only, deleted with the audit event                                             | ☐              |
+| 8   | What happens to audit events when a user is removed?                               | Deleting them would erase the record of what that user did                 | Keep them under the user ID until the retention period ends                                               | ☐              |
+| 9   | Who receives security alerts (audit failures, spikes in denials)?                  | Alerts are useless if nobody owns them                                     | One named person plus a team channel                                                                      | ☐              |
+| 10  | Is sensitive-action blocking during an audit outage acceptable (§10.7)?            | It trades availability for a complete record                               | Yes                                                                                                       | ☐              |
+| 11  | Do any Stevens or legal requirements apply to what we log and how long we keep it? | They may override the answers above                                        | _Unknown._ Ask the Owner or the university IT security office.                                            | ☐              |
+| 12  | What is the monthly budget for logging and storage?                                | CloudTrail data events and long retention cost money                       | To be estimated once the backend is located                                                               | ☐              |
+
+### 10.9 Gaps between today and these requirements
+
+| Gap                                                                          | Where                                           | Fix                                                                      |
+| ---------------------------------------------------------------------------- | ----------------------------------------------- | ------------------------------------------------------------------------ |
+| A Bearer token is printed in the browser console when loading entries fails  | `src/pages/Home.tsx`                            | Log `error.message` only. Apply the same rule to every `console.*` call. |
+| Whole error objects are logged in 8 other places                             | `AuthContext.tsx`, `apiClient.ts`, `Header.tsx` | Route all logging through one helper that strips forbidden fields        |
+| Tokens are kept in `localStorage` with no CSP                                | `main.tsx` (Amplify default) and `index.html`   | Decide on token storage, and add a strict CSP (§10.6)                    |
+| No audit events exist                                                        | Backend (not in this repo)                      | Build them to the §10.4 schema, written before responses are returned    |
+| The CloudTrail, data event, Cognito and API Gateway logging setup is unknown | AWS                                             | An administrator confirms each row of §10.3                              |
+| The list endpoint appears to return ciphertext                               | API contract (`ListPasswordEntriesResponse`)    | Remove ciphertext from list responses (§6)                               |
+
+### 10.10 S1-10 acceptance criteria checklist
+
+| Acceptance criterion                                                        | Where it is met                                                                                                                                            |
+| --------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Audit-event schema proposed                                                 | §10.4: event types, field table and two worked examples                                                                                                    |
+| Authentication/authorization decisions included                             | §10.4: `auth.token_rejected`, `authz.denied` and the `authz.decision` / `authz.rule` fields on every event. Both allowed and denied outcomes are recorded. |
+| No plaintext secrets, tokens or sensitive headers permitted in audit events | §10.5: the forbidden list and how it is enforced. §10.6: secret-handling rules.                                                                            |
+| AWS-level and application-level audit responsibilities differentiated       | §10.3: responsibilities by layer, with an owner for each                                                                                                   |
+| Audit failure behavior considered                                           | §10.7: fail closed or fail open per action, write before returning, alerting                                                                               |
+| Retention and tamper-resistance questions identified for Owner approval     | §10.8: 12 questions, each with a proposed answer and a decision box                                                                                        |
+
+### 10.11 Applying this to `blueprint_deploy`
+
+The same rules should apply to `blueprint_deploy`, with these event types: `deployment.create`, `deployment.update`, `deployment.delete` and `deployment.status_read`, plus `auth.token_rejected` and `authz.denied`. Its frontend has the same console-logging pattern and the same `localStorage` token storage, because the auth code is shared (§9). Any fix should be made in both repos.
